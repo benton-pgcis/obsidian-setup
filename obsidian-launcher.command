@@ -5,9 +5,9 @@ set -eo pipefail
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 SCRIPT_NAME="Obsidian Launcher"
-UPDATE_URL=""  # Set when hosting is decided
+UPDATE_URL="https://github.com/benton-pgcis/obsidian-setup/releases/latest/download/obsidian-launcher.command"
 INSTALL_PATH="$HOME/obsidian-vaults"
 OBSIDIAN_SUPPORT="$HOME/Library/Application Support/obsidian"
 OBSIDIAN_JSON="$OBSIDIAN_SUPPORT/obsidian.json"
