@@ -12,8 +12,9 @@ INSTALL_PATH="$HOME/obsidian-vaults"
 OBSIDIAN_SUPPORT="$HOME/Library/Application Support/obsidian"
 OBSIDIAN_JSON="$OBSIDIAN_SUPPORT/obsidian.json"
 BRANCH="main"
-READ_ONLY=true
-AUTO_PULL_INTERVAL=10
+AUTO_PULL_INTERVAL=30
+AUTO_PUSH_INTERVAL=60
+AUTO_SAVE_INTERVAL=5
 
 # Vault Registry: "local_name|github_account|repo_name|display_name"
 VAULTS=(
@@ -52,7 +53,7 @@ print_header() {
 print_step() {
   local num="$1" msg="$2"
   echo ""
-  echo -e "${BOLD}${CYAN}[ ${num}/8 ] ${msg}${RESET}"
+  echo -e "${BOLD}${CYAN}[ ${num}/9 ] ${msg}${RESET}"
 }
 
 print_ok() {
@@ -188,25 +189,37 @@ step_2_obsidian() {
   fi
 }
 
-# ── Step 3: GitHub CLI ────────────────────────────────────────────────────────
+# ── Step 3: GitHub CLI + Node.js ─────────────────────────────────────────────
 
-step_3_github_cli() {
-  print_step 3 "GitHub CLI"
+step_3_cli_tools() {
+  print_step 3 "CLI Tools"
 
+  # GitHub CLI
   if command_exists gh; then
     print_skip "GitHub CLI installed"
-    return 0
+  else
+    print_info "Installing GitHub CLI..."
+    brew install gh
+    if command_exists gh; then
+      print_ok "GitHub CLI installed"
+    else
+      print_fail "GitHub CLI installation failed"
+      show_error_dialog "GitHub CLI installation failed. Please try again or contact benton@pgcis.com for help."
+      return 1
+    fi
   fi
 
-  print_info "Installing GitHub CLI..."
-  brew install gh
-
-  if command_exists gh; then
-    print_ok "GitHub CLI installed"
+  # Node.js (required for Google Docs Publisher)
+  if command_exists node; then
+    print_skip "Node.js installed"
   else
-    print_fail "GitHub CLI installation failed"
-    show_error_dialog "GitHub CLI installation failed. Please try again or contact benton@pgcis.com for help."
-    return 1
+    print_info "Installing Node.js..."
+    brew install node
+    if command_exists node; then
+      print_ok "Node.js installed"
+    else
+      print_warn "Node.js installation failed - Google Docs Publisher will not work"
+    fi
   fi
 }
 
@@ -321,37 +334,92 @@ step_5_vault_picker() {
 
 # ── Step 6: Clone or Repair ───────────────────────────────────────────────────
 
-apply_readonly_config() {
+# Plugin Registry: "plugin_id|github_owner|github_repo|display_name"
+PLUGINS=(
+  "obsidian-git|Vinzent03|obsidian-git|Git"
+  "dataview|blacksmithgu|obsidian-dataview|Dataview"
+  "obsidian-shellcommands|Taitava|obsidian-shellcommands|Shell Commands"
+)
+
+download_plugin() {
+  local plugin_id="$1" gh_owner="$2" gh_repo="$3" display_name="$4" plugin_dir="$5"
+  local release_base="https://github.com/$gh_owner/$gh_repo/releases/latest/download"
+
+  mkdir -p "$plugin_dir"
+
+  if [[ -s "$plugin_dir/main.js" ]]; then
+    return 0  # Already installed
+  fi
+
+  print_info "  Downloading $display_name plugin..."
+  curl -sfL "$release_base/main.js" -o "$plugin_dir/main.js" || true
+  curl -sfL "$release_base/manifest.json" -o "$plugin_dir/manifest.json" || true
+  curl -sfL "$release_base/styles.css" -o "$plugin_dir/styles.css" 2>/dev/null || true
+
+  if [[ ! -s "$plugin_dir/main.js" ]]; then
+    print_warn "  Could not download $display_name - install it manually from Obsidian"
+    return 1
+  fi
+  print_ok "  $display_name plugin installed"
+  return 0
+}
+
+install_plugins() {
   local vault_path="$1"
-  local data_file="$vault_path/.obsidian/plugins/obsidian-git/data.json"
+  local obsidian_dir="$vault_path/.obsidian"
+  local community_file="$obsidian_dir/community-plugins.json"
 
-  if ! $READ_ONLY; then
-    return 0
-  fi
+  # Download each plugin
+  local installed_ids=()
+  for plugin_entry in "${PLUGINS[@]}"; do
+    IFS='|' read -r plugin_id gh_owner gh_repo display_name <<< "$plugin_entry"
+    local plugin_dir="$obsidian_dir/plugins/$plugin_id"
+    if download_plugin "$plugin_id" "$gh_owner" "$gh_repo" "$display_name" "$plugin_dir"; then
+      installed_ids+=("$plugin_id")
+    fi
+  done
 
-  if [[ ! -f "$data_file" ]]; then
-    print_info "  No obsidian-git config found, skipping read-only setup"
-    return 0
-  fi
-
-  # Merge read-only overrides into existing data.json (preserves all other settings)
+  # Register all installed plugins in community-plugins.json
   /usr/bin/python3 -c "
+import json, sys
+cp_file = sys.argv[1]
+plugin_ids = sys.argv[2:]
+try:
+    with open(cp_file) as f:
+        plugins = json.load(f)
+except (IOError, ValueError):
+    plugins = []
+for pid in plugin_ids:
+    if pid not in plugins:
+        plugins.append(pid)
+with open(cp_file, 'w') as f:
+    json.dump(plugins, f, indent=2)
+    f.write('\n')
+" "$community_file" "${installed_ids[@]}"
+
+  # Configure Obsidian Git sync settings
+  local git_data="$obsidian_dir/plugins/obsidian-git/data.json"
+  if [[ -d "$obsidian_dir/plugins/obsidian-git" ]]; then
+    /usr/bin/python3 -c "
 import json, sys
 data_file = sys.argv[1]
 try:
     with open(data_file) as f:
         data = json.load(f)
-except (ValueError, IOError):
+except (IOError, ValueError):
     data = {}
-data['disablePush'] = True
+data['disablePush'] = False
 data['autoPullInterval'] = int(sys.argv[2])
 data['autoPullOnBoot'] = True
-data['autoSaveInterval'] = 0
-data['autoPushInterval'] = 0
+data['autoPushInterval'] = int(sys.argv[3])
+data['autoSaveInterval'] = int(sys.argv[4])
+data['pullBeforePush'] = True
+data['syncMethod'] = 'merge'
 with open(data_file, 'w') as f:
     json.dump(data, f, indent=2)
     f.write('\n')
-" "$data_file" "$AUTO_PULL_INTERVAL"
+" "$git_data" "$AUTO_PULL_INTERVAL" "$AUTO_PUSH_INTERVAL" "$AUTO_SAVE_INTERVAL"
+  fi
 }
 
 step_6_clone_repair() {
@@ -376,7 +444,7 @@ step_6_clone_repair() {
       # Repair mode
       print_info "Repairing $display_name..."
       if (cd "$vault_path" && git fetch origin && git reset --hard "origin/$BRANCH") &>/dev/null; then
-        apply_readonly_config "$vault_path"
+        install_plugins "$vault_path"
         print_ok "$display_name (repaired)"
         successes+=("$vault_entry")
       else
@@ -387,12 +455,9 @@ step_6_clone_repair() {
       # Fresh clone
       print_info "Cloning $display_name..."
       local clone_cmd="gh repo clone $gh_account/$repo_name $vault_path -- --branch $BRANCH"
-      if $READ_ONLY; then
-        clone_cmd+=" --depth 1"
-      fi
 
       if eval "$clone_cmd" 2>/dev/null; then
-        apply_readonly_config "$vault_path"
+        install_plugins "$vault_path"
         print_ok "$display_name (installed)"
         successes+=("$vault_entry")
       else
@@ -416,10 +481,138 @@ step_6_clone_repair() {
   SELECTED_VAULTS=("${successes[@]}")
 }
 
-# ── Step 7: Register Vaults in Obsidian ───────────────────────────────────────
+# ── Step 7: Vault Tools (npm, Shell Commands, hotkeys) ───────────────────────
 
-step_7_register() {
-  print_step 7 "Registering Vaults"
+setup_vault_tools() {
+  local vault_path="$1" local_name="$2"
+  local publisher_dir="$vault_path/_Tools/Google Docs Publisher"
+
+  # Skip if vault doesn't have the publisher
+  if [[ ! -f "$publisher_dir/package.json" ]]; then
+    return 0
+  fi
+
+  # npm install (node_modules is gitignored, must install per clone)
+  if [[ ! -d "$publisher_dir/node_modules" ]] && command_exists node; then
+    print_info "  Installing Google Docs Publisher dependencies..."
+    (cd "$publisher_dir" && npm install --silent 2>/dev/null) && \
+      print_ok "  Google Docs Publisher dependencies installed" || \
+      print_warn "  npm install failed - run manually: cd \"$publisher_dir\" && npm install"
+  fi
+
+  # TODO: client_secret.json distribution
+  # Currently this file must be committed to the repo or manually placed.
+  # Long-term plan: download from a secure location (e.g., private GitHub Release
+  # asset, S3 presigned URL, or 1Password CLI). The OAuth client_secret.json
+  # identifies the GCP project and is not a user secret, but should still be
+  # distributed securely rather than committed to the vault repo.
+
+  # Configure Shell Commands plugin with Publish to Google Docs command
+  local sc_data="$vault_path/.obsidian/plugins/obsidian-shellcommands/data.json"
+  if [[ -d "$vault_path/.obsidian/plugins/obsidian-shellcommands" ]]; then
+    /usr/bin/python3 -c "
+import json, sys
+
+data_file = sys.argv[1]
+vault_path = sys.argv[2]
+
+try:
+    with open(data_file) as f:
+        data = json.load(f)
+except (IOError, ValueError):
+    data = {}
+
+# Ensure required top-level keys
+data.setdefault('settings_version', '0.23.0')
+data.setdefault('debug', False)
+data.setdefault('enable_events', True)
+data.setdefault('show_autocomplete_menu', True)
+data.setdefault('preview_variables_in_command_palette', True)
+data.setdefault('approve_modals_by_pressing_enter_key', True)
+
+cmds = data.setdefault('shell_commands', [])
+
+# Check if publish command already exists
+cmd_id = 'gdocs-publish'
+exists = any(c.get('id') == cmd_id for c in cmds)
+if not exists:
+    cmds.append({
+        'id': cmd_id,
+        'platform_specific_commands': {
+            'darwin': '\"{{vault_path}}/_Tools/Google Docs Publisher/publish-active.sh\" \"{{file_path:absolute}}\"',
+            'windows': '\"{{vault_path}}\\\\_Tools\\\\Google Docs Publisher\\\\publish-file.bat\" \"{{file_path:absolute}}\"'
+        },
+        'shells': {},
+        'alias': 'Publish to Google Docs',
+        'icon': None,
+        'confirm_execution': False,
+        'ignore_error_codes': [],
+        'input_contents': {'stdin': None},
+        'output_handlers': {
+            'stdout': {'handler': 'modal', 'convert_ansi_code': True},
+            'stderr': {'handler': 'notification', 'convert_ansi_code': True}
+        },
+        'output_wrappers': {'stdout': None, 'stderr': None},
+        'output_channel_order': 'stdout-first',
+        'output_handling_mode': 'buffered',
+        'execution_notification_mode': 'permanent',
+        'events': {},
+        'debounce': None,
+        'command_palette_availability': 'enabled',
+        'preactions': [],
+        'variable_default_values': {}
+    })
+
+data.setdefault('prompts', [])
+data.setdefault('builtin_variables', {})
+data.setdefault('custom_variables', [])
+data.setdefault('custom_shells', [])
+data.setdefault('output_wrappers', [])
+
+with open(data_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+" "$sc_data" "$vault_path"
+    print_ok "  Shell Commands configured (Publish to Google Docs)"
+  fi
+
+  # Configure hotkey: Alt+Shift+P for Publish to Google Docs
+  local hotkeys_file="$vault_path/.obsidian/hotkeys.json"
+  /usr/bin/python3 -c "
+import json, sys
+
+hotkeys_file = sys.argv[1]
+try:
+    with open(hotkeys_file) as f:
+        data = json.load(f)
+except (IOError, ValueError):
+    data = {}
+
+key = 'obsidian-shellcommands:shell-command-gdocs-publish'
+if key not in data:
+    data[key] = [{'modifiers': ['Alt', 'Shift'], 'key': 'P'}]
+
+with open(hotkeys_file, 'w') as f:
+    json.dump(data, f, indent=2)
+    f.write('\n')
+" "$hotkeys_file"
+  print_ok "  Hotkey configured (Alt+Shift+P = Publish to Google Docs)"
+}
+
+step_7_vault_tools() {
+  print_step 7 "Vault Tools"
+
+  for vault_entry in "${SELECTED_VAULTS[@]}"; do
+    IFS='|' read -r local_name gh_account repo_name display_name <<< "$vault_entry"
+    local vault_path="$INSTALL_PATH/$local_name"
+    setup_vault_tools "$vault_path" "$local_name"
+  done
+}
+
+# ── Step 8: Register Vaults in Obsidian ───────────────────────────────────────
+
+step_8_register() {
+  print_step 8 "Registering Vaults"
 
   # Check if Obsidian is running
   if pgrep -x "Obsidian" &>/dev/null; then
@@ -506,17 +699,12 @@ with open(obsidian_json, 'w') as f:
   print_ok "Registered ${#vault_paths[@]} vault(s) in Obsidian"
 }
 
-# ── Step 8: Open Obsidian ─────────────────────────────────────────────────────
+# ── Step 9: Open Obsidian ─────────────────────────────────────────────────────
 
-step_8_open() {
-  print_step 8 "Opening Obsidian"
+step_9_open() {
+  print_step 9 "Opening Obsidian"
 
   local count=${#SELECTED_VAULTS[@]}
-
-  # Show trust instruction dialog
-  osascript -e "
-    display dialog \"Almost done! When Obsidian opens:\" & return & return & \"1. Each vault will show a 'Trust author and enable plugins' prompt\" & return & \"2. Click 'Trust author and enable plugins' for each vault\" & return & \"3. Wait a moment for plugins to load\" & return & return & \"This enables auto-sync and other features.\" buttons {\"Got it!\"} default button \"Got it!\" with icon note with title \"$SCRIPT_NAME\"
-  " &>/dev/null || true
 
   # Open each vault via obsidian:// URI
   for vault_entry in "${SELECTED_VAULTS[@]}"; do
@@ -528,9 +716,35 @@ step_8_open() {
       encoded_path=$(/usr/bin/python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1]))" "$vault_path")
       open "obsidian://open?path=$encoded_path"
       print_ok "Opened $display_name"
-      sleep 2  # Give Obsidian time to process each vault
+      sleep 3  # Give Obsidian time to process each vault
     fi
   done
+
+  # Instructional pop-up 1: Turn on community plugins
+  osascript -e "
+    display dialog \"Step 1 of 2: Enable Community Plugins\" & return & return & \"In Obsidian, you should see a 'Restricted mode' notice at the top.\" & return & return & \"→ Click 'Turn on community plugins'\" & return & \"→ Click 'Turn on community plugins' again to confirm\" & return & return & \"Do this for each vault that was installed.\" & return & \"(The Git sync plugin has been pre-installed by this installer.)\" & return & return & \"Click Continue when done.\" buttons {\"Continue\"} default button \"Continue\" with icon note with title \"$SCRIPT_NAME\"
+  " &>/dev/null || true
+
+  # Instructional pop-up 2: Restart Obsidian to activate sync
+  osascript -e "
+    display dialog \"Step 2 of 3: Restart Obsidian\" & return & return & \"Now restart Obsidian so the sync plugin activates:\" & return & return & \"→ Quit Obsidian completely (⌘Q)\" & return & \"→ Reopen Obsidian from your Applications folder or Dock\" & return & return & \"After restart, your vaults will automatically:\" & return & \"  • Pull changes from GitHub every ${AUTO_PULL_INTERVAL} minutes\" & return & \"  • Push your changes every ${AUTO_PUSH_INTERVAL} minutes\" & return & \"  • Auto-save your edits every ${AUTO_SAVE_INTERVAL} minutes\" buttons {\"Continue\"} default button \"Continue\" with icon note with title \"$SCRIPT_NAME\"
+  " &>/dev/null || true
+
+  # Instructional pop-up 3: Google Docs Publisher auth (only if publisher exists in any vault)
+  local has_publisher=false
+  for vault_entry in "${SELECTED_VAULTS[@]}"; do
+    IFS='|' read -r local_name gh_account repo_name display_name <<< "$vault_entry"
+    if [[ -f "$INSTALL_PATH/$local_name/_Tools/Google Docs Publisher/index.js" ]]; then
+      has_publisher=true
+      break
+    fi
+  done
+
+  if $has_publisher; then
+    osascript -e "
+      display dialog \"Step 3 of 3: Google Docs Publisher\" & return & return & \"A 'Publish to Google Docs' command has been installed.\" & return & \"Hotkey: Alt + Shift + P\" & return & return & \"The first time you use it, you'll need to sign into Google:\" & return & \"  1. Open any note and press Alt+Shift+P\" & return & \"  2. A browser window will open for Google sign-in\" & return & \"  3. Grant permission, then copy the code shown\" & return & \"  4. Paste the code back into the Terminal window\" & return & return & \"After that, publishing works with one keypress.\" buttons {\"Done!\"} default button \"Done!\" with icon note with title \"$SCRIPT_NAME\"
+    " &>/dev/null || true
+  fi
 
   echo ""
   echo -e "${BOLD}${GREEN}════════════════════════════════════════${RESET}"
@@ -538,10 +752,10 @@ step_8_open() {
   echo -e "${BOLD}${GREEN}════════════════════════════════════════${RESET}"
   echo ""
   print_info "Installed $count vault(s) to $INSTALL_PATH/"
-  if $READ_ONLY; then
-    print_info "Vaults are in READ-ONLY mode (auto-pull, no push)"
+  print_info "Sync: pull every ${AUTO_PULL_INTERVAL}min, push every ${AUTO_PUSH_INTERVAL}min, auto-save every ${AUTO_SAVE_INTERVAL}min"
+  if $has_publisher; then
+    print_info "Publish to Google Docs: Alt+Shift+P (first use requires Google sign-in)"
   fi
-  print_info "Vaults will auto-sync from GitHub every ${AUTO_PULL_INTERVAL} minutes"
   echo ""
   print_info "To re-run this installer (repair or add vaults):"
   print_info "  Double-click obsidian-launcher.command"
@@ -561,14 +775,15 @@ main() {
 
   step_0_preflight "$@"
 
-  step_1_homebrew    || exit 1
-  step_2_obsidian    || exit 1
-  step_3_github_cli  || exit 1
-  step_4_auth        || exit 1
+  step_1_homebrew     || exit 1
+  step_2_obsidian     || exit 1
+  step_3_cli_tools    || exit 1
+  step_4_auth         || exit 1
   step_5_vault_picker || exit 0
   step_6_clone_repair
-  step_7_register
-  step_8_open
+  step_7_vault_tools
+  step_8_register
+  step_9_open
 }
 
 main "$@"
