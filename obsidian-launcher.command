@@ -697,6 +697,13 @@ with open(obsidian_json, 'w') as f:
 " "$OBSIDIAN_JSON" "${vault_paths[@]}"
 
   print_ok "Registered ${#vault_paths[@]} vault(s) in Obsidian"
+
+  # Open vault folder in Finder and prompt user to add to sidebar
+  open "$INSTALL_PATH"
+  osascript -e "
+    display dialog \"Your vault folders are now open in Finder.\" & return & return & \"To add them to your Finder sidebar:\" & return & \"→ Drag each vault folder to the Favorites section in the sidebar\" & return & return & \"This makes them easy to find later.\" buttons {\"OK\"} default button \"OK\" with icon note with title \"$SCRIPT_NAME\"
+  " &>/dev/null || true
+  print_ok "Opened vault folder in Finder"
 }
 
 # ── Step 9: Open Obsidian ─────────────────────────────────────────────────────
